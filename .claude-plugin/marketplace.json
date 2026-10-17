@@ -1,0 +1,6 @@
+{
+  "name": "tuffclaude",
+  "owner": { "name": "DirenDenizYildirim" },
+  "description": "Mods for Claude Code.",
+  "plugins": [{ "name": "opencode-style", "source": "./opencode-style" }]
+}

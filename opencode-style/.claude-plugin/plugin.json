@@ -1,0 +1,6 @@
+{
+  "name": "opencode-style",
+  "version": "0.1.0",
+  "description": "Makes Claude Code look and feel like opencode: its themes, sidebar, tool rows, prompt footer and commands.",
+  "types": "./types/index.d.ts"
+}
