@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
+import { costOf, shortModel } from '../hooks/agents'
 import { lanesOf } from '../hooks/history'
 
 const PLUGIN = 'opencode-style'
@@ -216,5 +217,64 @@ describe('timeline history', () => {
     expect(lanes[0]?.ticks).toEqual([{ kind: 'read' }, { kind: 'wait' }, { kind: 'shell', isErrored: true, isSlow: true }])
     expect(lanes[1]?.prompt).toBe('and the docs')
     expect(lanes[1]?.ms).toBeUndefined()
+  })
+})
+
+describe('agents', () => {
+  const pane = { plugin: PLUGIN, surface: 'terminal' as const, component: 'Pane' as const, requestId: 'oc-sidebar', props: { title: 'Session', isFocused: false, bodyColumns: 40, placement: 'dock' as const, scroll, view: {} } }
+
+  test('a launched agent gets a card in the Agents tab and a line in the sidebar, then finishes', async ($, on) => {
+    mock.store(on)
+    mock.clock(on)
+    let release = () => {}
+    const gate = new Promise<void>(resolve => (release = resolve))
+    on('tool.call', async () => {
+      await gate
+
+      return { result: { status: 'completed', agentId: 'a1', totalTokens: 120_000, totalDurationMs: 4000, totalToolUseCount: 1, content: [], prompt: 'look for the theme files', usage: {} } } as never
+    })
+    on('turn.start', ($, e) => ({ turnId: e.turnId }) as never)
+    on('turn.complete', () => ({ text: '' }) as never)
+    on('turn.step', async function* (_$, e) {
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: { model: 'claude-sonnet-5-5', input_tokens: 100_000, output_tokens: 500, cache_read_input_tokens: 10_000, cache_creation_input_tokens: 1_000 } } as never
+    })
+
+    const call = $.tool.call({ tool: 'Agent', tool_use_id: 'ag1', description: 'find theme files', prompt: 'look for the theme files', subagent_type: 'Explore' } as never)
+    await $.turn.start({ text: 'look for the theme files', turnId: 't1', agentId: 'a1', input: null } as never)
+    const stream = $.turn.step({ turnId: 't1', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId: 'a1' } as never)
+    for await (const _chunk of stream) {
+      // drained
+    }
+    await stream.result
+
+    const tab = { ...pane, requestId: 'oc-agents', props: { ...pane.props, title: 'Agents' } }
+    const live = await $.ui.mount(tab)
+    expect(await live.find({ text: 'Agents' })).toBeDefined()
+    expect(await live.find({ text: 'Explore' })).toBeDefined()
+    expect(await live.find({ text: 'Sonnet 5.5' })).toBeDefined()
+    expect(await live.find({ text: 'find theme files' })).toBeDefined()
+    expect(await live.find({ text: '111.5K tokens · $0.21' })).toBeDefined()
+    expect(await live.find({ text: '1 running · ' })).toBeDefined()
+    await live.unmount()
+
+    const side = await $.ui.mount(pane)
+    expect(await side.find({ text: '1 running · $0.21 · in their tab' })).toBeDefined()
+    await side.unmount()
+
+    release()
+    await call
+    const done = await $.ui.mount(tab)
+    expect(await done.find({ text: '✓ ' })).toBeDefined()
+    expect(await done.find({ text: '120.0K tokens · $0.21' })).toBeDefined()
+    await done.unmount()
+  })
+
+  test('costs follow each model\'s prices, and models get short names', () => {
+    expect(costOf('claude-opus-5-5', { input_tokens: 1_000_000, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })).toBe(4)
+    expect(costOf('claude-haiku-5-5', { input_tokens: 0, output_tokens: 1_000_000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })).toBe(0.5)
+    expect(costOf('some-other-model', { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 })).toBeUndefined()
+    expect(shortModel('claude-opus-5-5')).toBe('Opus 5.5')
+    expect(shortModel('claude-haiku-4-5-20251001')).toBe('Haiku 4.5')
+    expect(shortModel('sonnet')).toBe('Sonnet')
   })
 })

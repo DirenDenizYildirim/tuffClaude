@@ -339,6 +339,7 @@ export function home(look: Look, tip: { lead: string; rest: string }, columns: n
 export type SidebarFacts = {
   title: string
   usage: OcUsage | null
+  agents: RenderElement | null
   mcp: string[]
   todos: OcTodo[]
   files: Record<string, OcFile>
@@ -372,6 +373,10 @@ export function sidebar(look: Look, s: SidebarFacts) {
         {s.usage.usd === undefined ? '' : <Text color={p.textMuted}>{`${formatUsd(s.usage.usd)} spent`}</Text>}
       </Box>,
     )
+  }
+
+  if (s.agents !== null) {
+    sections.push(s.agents)
   }
 
   if (s.mcp.length > 0) {

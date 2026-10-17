@@ -5,8 +5,9 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { OcActivity, OcLane, OcTodo, OcTurn, OcUsage } from '../types'
-import { spinnerGallery, spinnerRow, themeStudio, tickKind, timeline } from './candy'
+import type { OcActivity, OcAgent, OcLane, OcTodo, OcTurn, OcUsage } from '../types'
+import { costOf, tokensOf } from './agents'
+import { agentsLine, agentsTab, spinnerGallery, spinnerRow, themeStudio, tickKind, timeline } from './candy'
 import {
   bashBlock,
   editBlock,
@@ -30,6 +31,7 @@ import { bashBody, patchOf, rowOf, todoLines, writeBody } from './tools'
 
 const PLUGIN = 'opencode-style'
 const SIDEBAR = 'oc-sidebar'
+const AGENTS_PANE = 'oc-agents'
 const THEMES = 'oc-themes'
 const MINIMAP = 'oc-minimap'
 const SPINNER_PANE = 'oc-spinners'
@@ -38,6 +40,7 @@ const SLOW_MS = 15_000
 const WAIT_MS = 20_000
 const MAX_LANES = 60
 const MAX_TICKS = 300
+const MAX_AGENTS = 30
 const FRAME_MS = 45
 const BASH_LINES = 10
 const WRITE_LINES = 40
@@ -64,6 +67,7 @@ const expandedAtom = atom({ plugin: 'opencode-style', key: 'expanded' } as const
 const spinnerAtom = atom({ plugin: 'opencode-style', key: 'spinner' } as const, DEFAULT_SPINNER as string)
 const activityAtom = atom({ plugin: 'opencode-style', key: 'activity' } as const, null as OcActivity | null)
 const timelineAtom = atom({ plugin: 'opencode-style', key: 'timeline' } as const, [] as OcLane[])
+const agentsAtom = atom({ plugin: 'opencode-style', key: 'agents' } as const, [] as OcAgent[])
 
 // Prompts the person typed, as opposed to notifications and other agents' messages.
 const TYPED = new Set(['composer', 'bridge', 'sdk'])
@@ -92,6 +96,7 @@ const TIPS: { lead: string; rest: string }[] = [
   { lead: '@', rest: ' in the prompt mentions a file' },
   { lead: '/spinner', rest: ' picks how the working indicator moves' },
   { lead: '/minimap', rest: ' shows the session as a timeline' },
+  { lead: '/agents', rest: ' shows the agents Claude launched, with their tokens and cost' },
 ]
 
 const COMMANDS: { name: string; description: string; argumentHint?: string; runs?: string }[] = [
@@ -105,6 +110,7 @@ const COMMANDS: { name: string; description: string; argumentHint?: string; runs
   { name: 'details', description: 'Show or hide tool details' },
   { name: 'spinner', description: 'Pick a spinner style', argumentHint: '[style]' },
   { name: 'minimap', description: 'Show or hide the session timeline' },
+  { name: 'agents', description: 'Show or hide the Agents tab' },
 ]
 
 // Claude Code's mode, as opencode names its primary agents.
@@ -153,6 +159,10 @@ let isGalleryOpen = false
 const running = new Map<string, OcActivity & { startedAt: number }>()
 // When the timeline last saw something happen, to mark long silences.
 let lastBeat = 0
+// How many subagents run now: while any do, the frame ticks so the sidebar's spinners turn.
+let agentsRunning = 0
+// Whether the person closed the Agents tab this session: then a launch no longer reopens it.
+let isAgentsTabClosed = false
 
 async function lookOf($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0]): Promise<Look> {
   const theme = themeOf(await read($, themeAtom))
@@ -201,6 +211,58 @@ async function pickSpinner($: EngineInterface, style: SpinnerStyle): Promise<voi
   await $.store.set('spinner', style)
   $.ui.toast(`Spinner: ${style}, ${SPINNER_NOTES[style]}`)
 }
+
+// Changes the newest agent `match` finds, if any, and recounts the running ones.
+async function changeAgent($: EngineInterface, match: (agent: OcAgent) => boolean, change: (agent: OcAgent) => OcAgent): Promise<void> {
+  await update($, agentsAtom, agents => {
+    const i = agents.findLastIndex(match)
+
+    return i < 0 ? agents : agents.map((agent, at) => (at === i ? change(agent) : agent))
+  })
+  const was = agentsRunning
+  agentsRunning = (await read($, agentsAtom)).filter(agent => agent.status === 'running').length
+
+  if (was !== agentsRunning) {
+    await retitleAgentsTab($)
+  }
+}
+
+const agentsTabTitle = (): string => (agentsRunning > 0 ? `Agents · ${agentsRunning}` : 'Agents')
+
+async function openAgentsTab($: EngineInterface): Promise<boolean> {
+  const opened = await $.ui.open({ id: AGENTS_PANE, title: agentsTabTitle(), columns: 42 })
+
+  return opened.isPlaced
+}
+
+// The tab's label says how many agents run; opening an open pane only retitles it. A
+// label is no reason to fail the hook that tracks the agent, so a refusal is only logged.
+async function retitleAgentsTab($: EngineInterface): Promise<void> {
+  try {
+    if ((await $.ui.panes()).some(pane => pane.id === AGENTS_PANE)) {
+      await openAgentsTab($)
+    }
+  } catch (error) {
+    $.ui.log(`agents tab: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+  }
+}
+
+// Ties a subagent's loop id to the call that launched it: by its prompt where the engine
+// gives one, else the oldest launch still waiting for an id.
+async function linkAgent($: EngineInterface, agentId: string, prompt?: string): Promise<void> {
+  const agents = await read($, agentsAtom)
+
+  if (agents.some(agent => agent.agentId === agentId)) return
+
+  const waiting = agents.filter(agent => agent.agentId === undefined && agent.status === 'running')
+  const found = waiting.find(agent => prompt !== undefined && prompt !== '' && agent.prompt.trim() === prompt.trim()) ?? waiting[0]
+
+  if (found !== undefined) {
+    await changeAgent($, agent => agent.id === found.id, agent => ({ ...agent, agentId }))
+  }
+}
+
+const isAgentTool = (tool: string): boolean => tool === 'Agent' || tool === 'Task'
 
 async function location($: EngineInterface): Promise<string> {
   const branch = await read($, branchAtom)
@@ -295,6 +357,8 @@ async function resetSession($: EngineInterface): Promise<void> {
   await update($, titleAtom, () => '')
   await update($, turnsAtom, () => ({}))
   await update($, timelineAtom, () => [])
+  await update($, agentsAtom, () => [])
+  agentsRunning = 0
   running.clear()
 }
 
@@ -336,6 +400,7 @@ export const register: Register = on => {
     const spinner = spinnerOf(await $.store.get('spinner'))
     await update($, spinnerAtom, () => spinner)
     isGalleryOpen = false
+    isAgentsTabClosed = false
 
     for (const command of COMMANDS) {
       await $.command
@@ -358,6 +423,8 @@ export const register: Register = on => {
         .catch((error: unknown) => $.ui.log(`timeline: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' }))
     }
 
+    agentsRunning = (await read($, agentsAtom)).filter(agent => agent.status === 'running').length
+
     // Only a running turn's indicators read the frame, so the tick redraws nothing else.
     ticker?.cancel()
     // opencode docks its sidebar beside the transcript; Claude Code docks panes in fullscreen,
@@ -365,7 +432,7 @@ export const register: Register = on => {
     sidebarWanted = e.isInteractive && (await $.store.get('sidebar')) !== false
     dockSeen = undefined
     ticker = $.clock.every(FRAME_MS, () => {
-      void read($, workingAtom).then(isWorking => (isWorking || isGalleryOpen ? update($, frameAtom, frame => frame + 1) : undefined))
+      void read($, workingAtom).then(isWorking => (isWorking || isGalleryOpen || agentsRunning > 0 ? update($, frameAtom, frame => frame + 1) : undefined))
 
       if (sidebarWanted && dockSeen !== undefined) {
         sidebarWanted = false
@@ -456,6 +523,27 @@ export const register: Register = on => {
 
     return {}
   }).catch(() => ({ text: 'opencode-style: that command failed; the debug log says why.' }))
+
+  on('command.run', { command: 'agents' }, async $ => {
+    if ((await $.ui.panes()).some(pane => pane.id === AGENTS_PANE && pane.isPlaced)) {
+      await $.ui.close({ id: AGENTS_PANE })
+
+      return {}
+    }
+
+    isAgentsTabClosed = false
+    const isPlaced = await openAgentsTab($)
+
+    return isPlaced ? {} : { text: 'The Agents tab opens once the terminal is wide enough.' }
+  }).catch(() => ({ text: 'opencode-style: that command failed; the debug log says why.' }))
+
+  on('ui.close', { id: AGENTS_PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person') {
+      isAgentsTabClosed = true
+    }
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'minimap' }, async $ => {
     const isShown = (await $.ui.panes()).some(pane => pane.id === MINIMAP && pane.isPlaced)
@@ -580,9 +668,46 @@ export const register: Register = on => {
       const now = await $.clock.now()
       await update($, workStartedAtom, () => now)
       await update($, workingAtom, () => true)
+    } else {
+      // A subagent's run begins, or a finished one is sent more work.
+      const agentId = e.agentId
+      const now = await $.clock.now()
+      await linkAgent($, agentId, e.text)
+      await changeAgent($, agent => agent.agentId === agentId && agent.status !== 'running', ({ ms, ...agent }) => ({ ...agent, status: 'running', startedAt: now - (ms ?? 0) }))
     }
 
     return next(e)
+  })
+
+  // Each response a subagent gets: its model at once, then what it cost.
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined) {
+      return yield* next(e)
+    }
+
+    const agentId = e.agentId
+
+    try {
+      await linkAgent($, agentId)
+      await changeAgent($, agent => agent.agentId === agentId, agent => ({ ...agent, model: e.model }))
+    } catch (error) {
+      $.ui.log(`agents: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' })
+    }
+
+    const result = yield* next(e)
+    const usage = result.usage
+
+    if (usage !== null) {
+      const usd = costOf(usage.model, usage)
+      await changeAgent($, agent => agent.agentId === agentId, agent => ({
+        ...agent,
+        model: usage.model,
+        tokens: tokensOf(usage),
+        ...(usd === undefined ? {} : { usd: (agent.usd ?? 0) + usd }),
+      })).catch((error: unknown) => $.ui.log(`agents: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' }))
+    }
+
+    return result
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -602,6 +727,12 @@ export const register: Register = on => {
       await update($, activityAtom, () => null)
       running.clear()
       await refreshUsage($).catch(() => undefined)
+    } else {
+      // A subagent's run ended: the only end a background agent reports.
+      const agentId = e.agentId
+      const now = await $.clock.now()
+      const status: OcAgent['status'] = e.reason === 'error' || e.reason === 'refusal' ? 'failed' : e.isAborted ? 'stopped' : 'done'
+      await changeAgent($, agent => agent.agentId === agentId && agent.status === 'running', agent => ({ ...agent, status, ms: now - agent.startedAt, activity: '' }))
     }
 
     return next(e)
@@ -620,6 +751,37 @@ export const register: Register = on => {
 
       running.set(id, { tool, detail: detailOf(tool, e), startedAt })
       await update($, activityAtom, () => ({ tool, detail: detailOf(tool, e) }))
+
+      if (isAgentTool(tool)) {
+        const f = fieldsOf(e)
+        const agent: OcAgent = {
+          id,
+          kind: textOf(f.subagent_type),
+          goal: oneLine(textOf(f.description)),
+          prompt: textOf(f.prompt),
+          model: textOf(f.model),
+          status: 'running',
+          startedAt,
+          tokens: 0,
+          tools: 0,
+          ...(f.run_in_background === true ? { isBackground: true } : {}),
+        }
+        await update($, agentsAtom, agents => [...agents, agent].slice(-MAX_AGENTS))
+        agentsRunning += 1
+
+        // The first launch opens the Agents tab beside the sidebar, where panes dock.
+        if (!isAgentsTabClosed && dockSeen === true) {
+          await openAgentsTab($).catch((error: unknown) => $.ui.log(`agents tab: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' }))
+        } else {
+          await retitleAgentsTab($)
+        }
+      }
+    } else {
+      // A subagent's own call: count it, and say what it is doing.
+      const agentId = e.agentId
+      const doing = autoSpinner('tool-use', { tool, detail: detailOf(tool, e) }).word ?? tool
+      await linkAgent($, agentId)
+      await changeAgent($, agent => agent.agentId === agentId, agent => ({ ...agent, tools: agent.tools + 1, activity: doing }))
     }
 
     const ran = await next(e).finally(async () => {
@@ -635,6 +797,36 @@ export const register: Register = on => {
       const isErrored = ran.deny !== undefined || ran.isError === true
       lastBeat = endedAt
       await addTick($, { kind: tickKind(tool), ...(isErrored ? { isErrored: true } : {}), ...(endedAt - startedAt > SLOW_MS ? { isSlow: true } : {}) })
+
+      if (isAgentTool(tool)) {
+        const r = fieldsOf(ran.result)
+        const agentId = textOf(r.agentId)
+        const model = textOf(r.resolvedModel)
+
+        await changeAgent($, agent => agent.id === id, agent => {
+          const known = { ...agent, ...(agentId === '' ? {} : { agentId }), ...(model === '' ? {} : { model }) }
+
+          if (r.status === 'async_launched') return { ...known, isBackground: true }
+          if (ran.deny !== undefined) return { ...known, status: 'stopped', ms: endedAt - startedAt }
+
+          return {
+            ...known,
+            status: isErrored ? 'failed' : 'done',
+            ms: endedAt - startedAt,
+            activity: '',
+            ...(typeof r.totalTokens === 'number' && r.totalTokens > 0 ? { tokens: r.totalTokens } : {}),
+          }
+        })
+      }
+    }
+
+    if (!isMain && e.agentId !== undefined) {
+      const agentId = e.agentId
+      const isErrored = ran.deny !== undefined || ran.isError === true
+      await changeAgent($, agent => agent.agentId === agentId, agent => ({
+        ...agent,
+        ticks: [...(agent.ticks ?? []), { kind: tickKind(tool), ...(isErrored ? { isErrored: true } : {}) }].slice(-80),
+      }))
     }
 
     if (!isMain || ran.deny !== undefined) {
@@ -919,9 +1111,14 @@ export const register: Register = on => {
     const look = await lookOf($, e)
     const title = (await read($, titleAtom)) || 'New session'
 
+    const agents = await read($, agentsAtom)
+    const isAnyRunning = agents.some(agent => agent.status === 'running')
+    const frame = isAnyRunning ? await read($, frameAtom) : 0
+
     return sidebar(look, {
       title,
       usage: await read($, usageAtom),
+      agents: agents.length === 0 ? null : agentsLine(look, agents, frame),
       mcp: await read($, mcpAtom),
       todos: await read($, todosAtom),
       files: await read($, filesAtom),
@@ -967,6 +1164,20 @@ export const register: Register = on => {
       void pickSpinner($, style)
         .then(() => $.ui.close({ id: SPINNER_PANE }))
         .catch((error: unknown) => $.ui.log(`spinner: ${error instanceof Error ? error.message : String(error)}`, { to: 'debug' }))
+    })
+  })
+
+  on('ui.render', { component: 'Pane', requestId: AGENTS_PANE }, async ($, e) => {
+    const look = await lookOf($, e)
+    const agents = await read($, agentsAtom)
+    const isAnyRunning = agents.some(agent => agent.status === 'running')
+
+    return agentsTab(look, {
+      agents,
+      frame: isAnyRunning ? await read($, frameAtom) : 0,
+      now: await $.clock.now(),
+      columns: e.props.bodyColumns,
+      rows: e.props.scroll.bodyRows,
     })
   })
 

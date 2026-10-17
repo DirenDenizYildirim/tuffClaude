@@ -18,6 +18,26 @@ export type OcTick = { kind: string; isErrored?: boolean; isSlow?: boolean }
 // One turn on the timeline: when it started, what was asked, its calls, how long it took.
 export type OcLane = { at: number; prompt: string; ticks: OcTick[]; ms?: number; isAborted?: boolean }
 
+// A subagent the main loop launched, as the sidebar lists it: what it was sent to do, on
+// which model, and what it has used so far. `id` is the launching call's tool_use_id.
+export type OcAgent = {
+  id: string
+  agentId?: string
+  kind: string
+  goal: string
+  prompt: string
+  model: string
+  status: 'running' | 'done' | 'failed' | 'stopped'
+  startedAt: number
+  ms?: number
+  tokens: number
+  usd?: number
+  tools: number
+  activity?: string
+  ticks?: OcTick[]
+  isBackground?: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'opencode-style': {
@@ -40,6 +60,7 @@ declare module 'claude-code' {
       spinner: string
       activity: OcActivity | null
       timeline: OcLane[]
+      agents: OcAgent[]
     }
   }
 }

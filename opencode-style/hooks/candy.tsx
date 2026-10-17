@@ -3,7 +3,8 @@
 
 import type { RenderElement } from 'claude-code'
 
-import type { OcLane, OcTick, OcUsage } from '../types'
+import type { OcAgent, OcLane, OcTick, OcUsage } from '../types'
+import { agentLabel, shortModel } from './agents'
 import type { Look } from './draw'
 import { clip, formatMs, formatUsd } from './format'
 import { mix, type Palette } from './palette'
@@ -127,6 +128,119 @@ export function miniGauge(look: Look, usage: OcUsage, cells = 10) {
       <Text color={heat(p, percent / 100)}>{` ${Math.round(percent)}%`}</Text>
       <Text color={p.textMuted}>{usage.usd === undefined ? '' : ` · ${formatUsd(usage.usd)}`}</Text>
     </Text>
+  )
+}
+
+// ── Agents ──────────────────────────────────────────────────────────────────
+
+const compact = (n: number): string => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(Math.round(n)))
+const dollars = (usd: number): string => (usd > 0 && usd < 0.01 ? '<$0.01' : formatUsd(usd))
+
+function statusOf(look: Look, agent: OcAgent, frame: number): Cell {
+  const { p } = look
+
+  if (agent.status === 'running') return { glyph: spinGlyph(look.spinner, frame), color: p.secondary }
+  if (agent.status === 'done') return { glyph: '✓', color: p.success }
+  if (agent.status === 'failed') return { glyph: '✗', color: p.error }
+
+  return { glyph: '■', color: p.textMuted }
+}
+
+// What the Session sidebar keeps of the agents: one line pointing at their tab.
+export function agentsLine(look: Look, agents: OcAgent[], frame: number) {
+  const { Text } = look.ui
+  const { p } = look
+  const running = agents.filter(agent => agent.status === 'running').length
+  const total = agents.reduce((sum, agent) => sum + (agent.usd ?? 0), 0)
+  const counts = running > 0 ? `${running} running` : `${agents.length} ${agents.length === 1 ? 'agent' : 'agents'}`
+
+  return (
+    <Text wrap="truncate-end">
+      <Text color={p.text} bold>
+        {'Agents '}
+      </Text>
+      {running > 0 ? <Text color={p.secondary}>{`${spinGlyph(look.spinner, frame)} `}</Text> : ''}
+      <Text color={p.textMuted}>{`${counts} · ${dollars(total)} · in their tab`}</Text>
+    </Text>
+  )
+}
+
+// One agent as a card: a bar in its status color, its type and model, the goal, a tick per
+// call it made (the timeline's colors), and what it has used.
+function agentCard(look: Look, agent: OcAgent, frame: number, now: number, width: number) {
+  const { Box, Text } = look.ui
+  const { p } = look
+  const mark = statusOf(look, agent, frame)
+  const took = agent.ms ?? Math.max(0, now - agent.startedAt)
+  const ticks = (agent.ticks ?? []).slice(-Math.max(4, width - 6))
+  const spent = [agent.tokens > 0 ? `${compact(agent.tokens)} tokens` : '', agent.usd === undefined ? '' : dollars(agent.usd)].filter(part => part !== '').join(' · ')
+
+  return (
+    <Box borderStyle="quote" borderColor={mark.color} backgroundColor={p.backgroundPanel} paddingLeft={1} paddingRight={1} flexDirection="column">
+      <Box flexDirection="row" justifyContent="space-between" gap={1}>
+        <Text wrap="truncate-end">
+          <Text color={mark.color}>{`${mark.glyph} `}</Text>
+          <Text color={p.text} bold>
+            {agentLabel(agent.kind)}
+          </Text>
+        </Text>
+        <Text color={p.textMuted}>{`${agent.model === '' ? '' : shortModel(agent.model)}${agent.isBackground === true ? ' · bg' : ''}`}</Text>
+      </Box>
+      <Text color={p.text} wrap="truncate-end">
+        {agent.goal === '' ? '…' : agent.goal}
+      </Text>
+      {ticks.length > 0 ? <Text>{cellsOf(look, ticks.map(tick => tickLook(p, tick)))}</Text> : ''}
+      <Box flexDirection="row" justifyContent="space-between" gap={1}>
+        <Text color={p.textMuted}>{`${agent.tools} ${agent.tools === 1 ? 'call' : 'calls'} · ${formatMs(took)}`}</Text>
+        <Text color={p.textMuted}>{spent}</Text>
+      </Box>
+      {agent.status === 'running' && agent.activity !== undefined && agent.activity !== '' ? (
+        <Text color={mix(p.textMuted, p.background, 0.7)} wrap="truncate-end">
+          {`↳ ${agent.activity}`}
+        </Text>
+      ) : (
+        ''
+      )}
+    </Box>
+  )
+}
+
+export type AgentsTabFacts = { agents: OcAgent[]; frame: number; now: number; columns: number; rows: number }
+
+// The Agents tab: the running agents first, then the rest, newest first; totals on top.
+export function agentsTab(look: Look, t: AgentsTabFacts) {
+  const { Box, Text } = look.ui
+  const { p } = look
+  const running = t.agents.filter(agent => agent.status === 'running')
+  const total = t.agents.reduce((sum, agent) => sum + (agent.usd ?? 0), 0)
+  const tokens = t.agents.reduce((sum, agent) => sum + agent.tokens, 0)
+  const calls = t.agents.reduce((sum, agent) => sum + agent.tools, 0)
+  const ordered = [...running.reverse(), ...t.agents.filter(agent => agent.status !== 'running').reverse()]
+  // A card takes five or six rows and a gap; what does not fit is counted at the bottom.
+  const fits = Math.max(1, Math.floor((t.rows - 5) / 7))
+  const shown = ordered.slice(0, fits)
+  const hidden = ordered.length - shown.length
+
+  return (
+    <Box flexDirection="column" paddingLeft={2} paddingRight={2} paddingTop={1} gap={1}>
+      <Box flexDirection="column">
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text color={p.text} bold>
+            {'Agents'}
+          </Text>
+          <Text>
+            {running.length > 0 ? <Text color={p.secondary}>{`${running.length} running · `}</Text> : ''}
+            <Text color={p.textMuted}>{dollars(total)}</Text>
+          </Text>
+        </Box>
+        <Text color={p.textMuted} wrap="truncate-end">
+          {t.agents.length === 0 ? 'None yet' : `${t.agents.length} launched · ${compact(tokens)} tokens · ${calls} calls`}
+        </Text>
+      </Box>
+      {t.agents.length === 0 ? <Text color={p.textMuted}>{'When Claude launches an agent, it shows up here: its goal, model, calls, tokens and cost.'}</Text> : ''}
+      {shown.map(agent => agentCard(look, agent, t.frame, t.now, t.columns - 4))}
+      {hidden > 0 ? <Text color={p.textMuted}>{`+${hidden} more`}</Text> : ''}
+    </Box>
   )
 }
 

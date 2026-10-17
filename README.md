@@ -11,6 +11,7 @@ Makes Claude Code look and feel like [opencode](https://github.com/sst/opencode)
 - **Spinners**: `/spinner` opens a gallery of animated styles. The default, `auto`, changes with what Claude is doing: a shimmer while thinking, a wave while writing, "Reading app.ts" or "Running npm test" during tools.
 - **Context gauge**: a small bar in the prompt footer's right corner that fills green to amber to red as the context window does.
 - **Timeline**: `/minimap` shows the session as a timeline, one row per turn with a colored tick per tool call, errors and slow calls marked.
+- **Agents tab**: when Claude launches a subagent, an Agents tab opens beside the sidebar (`/agents` toggles it), its title counting the ones running. Each agent gets a card: its type and model, the goal, a tick per tool call, what it is doing now, and its tokens, cost and time. Cost is estimated from token counts at Anthropic's API prices, since Claude Code reports no per-agent cost.
 - **Commands**: `/new`, `/sessions`, `/models`, `/undo`, `/mcps`, `/details`.
 
 Good to know:
